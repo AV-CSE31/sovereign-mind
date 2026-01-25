@@ -98,9 +98,17 @@ class OllamaEmbeddings:
         client = await self._get_client()
         # Use OpenAI-compatible endpoint provided by Llamafile
         try:
+            # Llamafile provides an OpenAI-compatible /v1/embeddings endpoint
+            # We need to ensure we don't double-append /v1 if it's already in base_url, 
+            # but standard config is http://localhost:8080
+            
+            url = f"{self.base_url}/v1/embeddings"
+            if "/v1" in self.base_url:
+                 url = f"{self.base_url}/embeddings"
+
             response = await client.post(
-                f"{self.base_url}/v1/embeddings",
-                json={"input": text, "model": "test"}, # Model name often ignored by llamafile, or use self.model
+                url,
+                json={"input": text, "model": self.model}, 
                 headers={"Authorization": "Bearer no-key"}
             )
             response.raise_for_status()
