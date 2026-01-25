@@ -6,6 +6,11 @@ Write-Host "   SOVEREIGN-MIND 3.0 - LAUNCHER        " -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
 # 1. Environment Checks
+if (-not (Test-Path ".env")) {
+    Write-Host "[*] Creating .env config from template..." -ForegroundColor Yellow
+    Copy-Item ".env.example" ".env"
+}
+
 $BinDir = ".\bin"
 $LlamaFile = "$BinDir\llamafile.exe"
 $ModelUrl = "https://huggingface.co/jartine/TinyLlama-1.1B-Chat-v1.0-llamafile/resolve/main/TinyLlama-1.1B-Chat-v1.0.Q5_K_M.llamafile?download=true" # Using TinyLlama (~700MB) as efficient small model
@@ -24,10 +29,11 @@ if (-not (Test-Path $LlamaFile)) {
     python scripts/download_model.py
     
     if (-not (Test-Path $LlamaFile)) {
-         Write-Host "[!] Download failed. Please download manually." -ForegroundColor Red
-         exit
+        Write-Host "[!] Download failed. Please download manually." -ForegroundColor Red
+        exit
     }
-} else {
+}
+else {
     Write-Host "[*] Inference Engine found." -ForegroundColor Green
 }
 

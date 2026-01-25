@@ -29,12 +29,34 @@ async def lifespan(app: FastAPI):
     logger = get_logger(__name__)
     settings = get_settings()
 
+    # Ensure data directories exist
+    import os
+    data_dirs = [
+        settings.vault_storage_path,
+        settings.audit_log_path,
+        settings.chroma_persist_directory,
+        "./data/temp"
+    ]
+    for d in data_dirs:
+        os.makedirs(d, exist_ok=True)
+
     logger.info(
         "application_starting",
         app_name=settings.app_name,
         version=settings.app_version,
         debug=settings.debug,
     )
+
+    # Start Local Inference Engine if needed
+    # We only start it if we are in 'local' mode and not running inside Docker 
+    # (assuming Docker handles its own services, though for single-container deployments this logic might hold)
+    from app.core.inference_engine import get_inference_engine
+    engine = get_inference_engine()
+    
+    # Simple heuristic: If we configured a local URL that matches our engine's default, try to start it.
+    if "localhost" in settings.ollama_base_url or "127.0.0.1" in settings.ollama_base_url:
+         # Non-blocking start
+         engine.start()
 
     yield
 
@@ -43,9 +65,12 @@ async def lifespan(app: FastAPI):
 
     # Clean up resources
     from app.services.rag_engine import _retriever
-
+    
     if _retriever is not None:
         await _retriever.close()
+        
+    if engine:
+        engine.stop()
 
 
 def create_app() -> FastAPI:
