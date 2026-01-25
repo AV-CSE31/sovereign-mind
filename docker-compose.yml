@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # Sovereign-Mind FastAPI Backend
+  sovereign-mind:
+    build: .
+    container_name: sovereign-mind-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_MODEL=qwen2:0.5b
+      - DEBUG=true
+    volumes:
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/v1/system/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Open WebUI Chat Interface (Generic)
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: sovereign-mind-openwebui
+    ports:
+      - "3000:8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://sovereign-mind:8000/v1
+      - OPENAI_API_KEY=not-needed
+      - WEBUI_AUTH=false
+      - OLLAMA_BASE_URL=
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      - sovereign-mind
+
+  # Custom Sovereign-Mind UI (Full Feature Integration)
+  sovereign-mind-ui:
+    build: ./ui
+    container_name: sovereign-mind-custom-ui
+    ports:
+      - "3001:3001"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://sovereign-mind:8000
+    depends_on:
+      - sovereign-mind
+
+volumes:
+  open-webui-data:
+
+
