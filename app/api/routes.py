@@ -44,6 +44,10 @@ from app.models.schemas import (
 from app.services.privacy_guard import get_anonymization_service
 from app.services.rag_engine import get_retriever
 
+from app.services.rag_engine import get_retriever
+from app.core.memory import get_memory_service
+from app.core.tracing import get_tracer
+
 logger = get_logger(__name__)
 
 router = APIRouter()
@@ -471,6 +475,49 @@ async def health_check():
         vault_unlocked=not vault.is_locked,
         rag_document_count=stats["document_count"],
     )
+
+
+# ============================================================================
+# Memory & Observability Endpoints (SOTA Dashboard)
+# ============================================================================
+
+@router.get("/v1/system/memory/{user_id}")
+async def get_user_memory(user_id: str):
+    """Get the user's memory profile from Mem0."""
+    try:
+        service = get_memory_service()
+        profile = service.get_all(user_id)
+        return {"user_id": user_id, "profile": profile}
+    except Exception as e:
+        logger.error("memory_fetch_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/v1/system/traces")
+async def get_system_traces(limit: int = 50):
+    """Get the last N execution traces."""
+    try:
+        trace_file = Path("./logs/traces/traces.jsonl")
+        if not trace_file.exists():
+            return {"traces": []}
+            
+        # collaborative reading of last N lines (simplistic)
+        lines = trace_file.read_text(encoding="utf-8").strip().split("\n")
+        recent = lines[-limit:]
+        
+        parsed = []
+        for line in recent:
+            try:
+                import json
+                parsed.append(json.loads(line))
+            except:
+                continue
+                
+        # Return reversed (newest first)
+        return {"traces": parsed[::-1]}
+    except Exception as e:
+         logger.error("trace_fetch_failed", error=str(e))
+         return {"traces": []}
 
 
 # ============================================================================

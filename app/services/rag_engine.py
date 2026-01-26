@@ -33,11 +33,13 @@ logger = get_logger(__name__)
 # Optional FlashRank import
 try:
     from flashrank import Ranker, RerankRequest
-
     FLASHRANK_AVAILABLE = True
 except ImportError:
     FLASHRANK_AVAILABLE = False
     logger.warning("flashrank_not_available", message="Reranking will be disabled")
+
+# Import Graph RAG components
+from app.services.knowledge_graph import GraphExtractor, get_graph_store, LocalGraphStore
 
 
 @dataclass
@@ -66,84 +68,34 @@ class RetrievalResult:
     retrieval_method: str = "hybrid"
 
 
-class OllamaEmbeddings:
-    """Local embeddings using Ollama.
-
-    Security Boundary: Embeddings are generated entirely locally.
+class HuggingFaceEmbeddings:
+    """Local embeddings using SentenceTransformer (HuggingFace).
+    
+    Security Boundary: Embeddings are generated entirely locally on CPU/GPU.
     No data leaves the device.
     """
 
-    def __init__(self, model: str = "nomic-embed-text", base_url: str = "http://localhost:11434"):
-        self.model = model
-        self.base_url = base_url
-        self._client: httpx.AsyncClient | None = None
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create async HTTP client."""
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=60.0)
-        return self._client
-
-    async def embed_text(self, text: str) -> list[float]:
-        """Generate embedding for a single text.
-
-        Security Boundary: Text is sent only to local inference server.
-
-        Args:
-            text: Text to embed.
-
-        Returns:
-            Embedding vector.
-        """
-        client = await self._get_client()
-        # Use OpenAI-compatible endpoint provided by Llamafile
+    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         try:
-            # Llamafile provides an OpenAI-compatible /v1/embeddings endpoint
-            # We need to ensure we don't double-append /v1 if it's already in base_url, 
-            # but standard config is http://localhost:8080
-            
-            url = f"{self.base_url}/v1/embeddings"
-            if "/v1" in self.base_url:
-                 url = f"{self.base_url}/embeddings"
-
-            response = await client.post(
-                url,
-                json={"input": text, "model": self.model}, 
-                headers={"Authorization": "Bearer no-key"}
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["data"][0]["embedding"]
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(model_name)
+        except ImportError:
+            raise ImportError("sentence-transformers not installed. Please install it.")
         except Exception as e:
-            # Fallback for standard Ollama if Llamafile fails?
-            # For now, assume Llamafile /v1/embeddings
-            logger.error("embedding_failed", error=str(e))
+            logger.error("embedding_model_load_failed", error=str(e))
             raise
 
+    async def embed_text(self, text: str) -> list[float]:
+        """Generate embedding for a single text."""
+        # Run synchronous model in thread pool to avoid blocking async loop
+        return await asyncio.to_thread(self.model.encode, text, convert_to_tensor=False)
+
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts.
-
-        Args:
-            texts: List of texts to embed.
-
-        Returns:
-            List of embedding vectors.
-        """
-        # Process in parallel with concurrency limit
-        semaphore = asyncio.Semaphore(5)
-
-        async def embed_with_limit(text: str) -> list[float]:
-            async with semaphore:
-                return await self.embed_text(text)
-
-        embeddings = await asyncio.gather(*[embed_with_limit(text) for text in texts])
-        return list(embeddings)
+        """Generate embeddings for multiple texts."""
+        return await asyncio.to_thread(self.model.encode, texts, convert_to_tensor=False)
 
     async def close(self) -> None:
-        """Close the HTTP client."""
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+        pass
 
 
 class DocumentChunker:
@@ -244,9 +196,8 @@ class HybridRetriever:
         )
 
         # Initialize embeddings (local)
-        self._embedder = OllamaEmbeddings(
-            model=self._settings.embedding_model,
-            base_url=self._settings.ollama_base_url,
+        self._embedder = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
         )
 
         # BM25 index (sparse retrieval) - rebuilt as needed
@@ -269,11 +220,22 @@ class HybridRetriever:
             chunk_overlap=self._settings.chunk_overlap,
         )
 
+        # Graph RAG components
+        self._graph_store = get_graph_store()
+        # Analyzer is lazy loaded to save memory if not needed immediately
+        self._graph_extractor = None
+
         logger.info(
             "hybrid_retriever_initialized",
             collection=self._settings.chroma_collection_name,
             reranking_enabled=self._reranker is not None,
+            graph_enabled=True,
         )
+
+    def _get_extractor(self) -> GraphExtractor:
+        if not self._graph_extractor:
+            self._graph_extractor = GraphExtractor()
+        return self._graph_extractor
 
     def _generate_doc_id(self, content: str) -> str:
         """Generate a deterministic document ID from content hash."""
@@ -333,10 +295,24 @@ class HybridRetriever:
             # Rebuild BM25 index
             self._bm25_index = BM25Okapi(self._bm25_corpus)
 
+            # --- SOTA: Graph Extraction (Async) ---
+            # Extract entities from the first few chunks (summary/intro) to populate the graph
+            # processing all chunks might be too slow for now.
+            try:
+                extractor = self._get_extractor()
+                # Aggregate text from first 3 chunks to get high-level entities
+                summary_text = "\n".join(chunk_texts[:3])
+                graph_data = await extractor.extract(summary_text)
+                self._graph_store.add_triplets(graph_data, source_doc_id=doc_id)
+                logger.info("graph_ingestion_complete", doc_id=doc_id, nodes=len(graph_data.entities))
+            except Exception as ge:
+                logger.warning("graph_ingestion_partial_fail", error=str(ge))
+
             logger.info(
                 "document_ingested",
                 doc_id=doc_id,
                 chunk_count=len(chunks),
+                graph_nodes=len(graph_data.entities) if 'graph_data' in locals() else 0
             )
 
             return len(chunks)
@@ -483,10 +459,44 @@ class HybridRetriever:
 
         return documents
 
+    def _graph_search(self, query: str, top_k: int) -> list[Document]:
+        """Perform GraphRAG search by extracting entities from query and finding neighbors.
+        
+        SOTA: Returns 'synthetic' documents constructed from graph triplets.
+        """
+        try:
+            # Simple keyword extraction from query (or use LLM)
+            # For speed, we just split by space and look for node matches
+            # Ideally, use the Extractor on the query itself
+            keywords = [w.lower() for w in query.split() if list(filter(str.isalnum, w))]
+            
+            # Get context from graph
+            triplets = self._graph_store.get_context(keywords, depth=1)
+            
+            if not triplets:
+                return []
+                
+            # Create a synthetic document summarizing the graph connections
+            content = "Graph Knowledge:\n" + "\n".join(triplets[:top_k*2])
+            
+            doc = Document(
+                id=f"graph_{hashlib.md5(query.encode()).hexdigest()[:8]}",
+                content=content,
+                metadata={"source": "knowledge_graph", "type": "triplets"},
+                score=1.0 # High confidence for explicit facts
+            )
+            
+            return [doc]
+            
+        except Exception as e:
+            logger.warning("graph_search_failed", error=str(e))
+            return []
+
     def _reciprocal_rank_fusion(
         self,
         dense_results: list[Document],
         sparse_results: list[Document],
+        graph_results: list[Document] = None, # Added graph results
         k: int = 60,
     ) -> list[Document]:
         """Combine dense and sparse results using Reciprocal Rank Fusion.
@@ -513,6 +523,13 @@ class HybridRetriever:
         # Process sparse results
         for rank, doc in enumerate(sparse_results):
             rrf_scores[doc.id] = rrf_scores.get(doc.id, 0) + 1 / (k + rank + 1)
+            if doc.id not in doc_map:
+                doc_map[doc.id] = doc
+
+        # Process graph results (Boost graph facts)
+        for rank, doc in enumerate(graph_results):
+            # Graph facts get a boost because they are explicit relationships
+            rrf_scores[doc.id] = rrf_scores.get(doc.id, 0) + 2.0 / (k + rank + 1)
             if doc.id not in doc_map:
                 doc_map[doc.id] = doc
 
@@ -584,8 +601,16 @@ class HybridRetriever:
             # Step 2: Sparse search (BM25)
             sparse_results = self._sparse_search(query, self._settings.sparse_top_k)
 
-            # Step 3: Reciprocal Rank Fusion
-            fused_results = self._reciprocal_rank_fusion(dense_results, sparse_results)
+            # Step 3: Graph search (SOTA)
+            graph_results = self._graph_search(query, top_k=5)
+
+            # Step 4: Reciprocal Rank Fusion
+            # Merge all three
+            fused_results = self._reciprocal_rank_fusion(
+                dense_results, 
+                sparse_results, 
+                graph_results
+            )
 
             # Step 4: Rerank top candidates
             final_results = self._rerank(

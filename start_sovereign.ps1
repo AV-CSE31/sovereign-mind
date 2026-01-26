@@ -37,7 +37,12 @@ else {
     Write-Host "[*] Inference Engine found." -ForegroundColor Green
 }
 
-# 3. Start Backend
+# 3. Ensure Local LLM (Ollama)
+Write-Host "[*] Verifying/Downloading AI Model (qwen2.5:0.5b)..." -ForegroundColor Yellow
+# Run pull (it will verify hash and skip if already exists, or download if missing)
+ollama pull qwen2.5:0.5b
+
+# 4. Start Backend
 Write-Host "[*] Starting Sovereign-Mind Backend..." -ForegroundColor Green
 Start-Process -FilePath "python" -ArgumentList "-m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000" -NoNewWindow
 # Note: In production we wouldn't use --reload

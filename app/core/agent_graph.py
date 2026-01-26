@@ -18,7 +18,8 @@ import json
 from enum import Enum
 from typing import Annotated, Any, TypedDict
 
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
+from app.core.schemas import Intent, IntentType, Plan, Grade, RewriteQuery
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
@@ -30,13 +31,16 @@ from app.core.exceptions import (
     MaxRetriesExceeded,
     PlanningError,
 )
+
 from app.core.logging import audit_log, get_logger, hash_for_audit
+from app.core.tracing import trace_node
 from app.services.rag_engine import Document, get_retriever
+from app.core.memory import get_memory_service, MemoryExtractor
 
 logger = get_logger(__name__)
 
 
-class Intent(str, Enum):
+class IntentEnum(str, Enum):
     """User intent classification."""
 
     SIMPLE_CHAT = "simple_chat"
@@ -59,6 +63,13 @@ class AgentState(TypedDict):
     retrieved_docs: list[dict[str, Any]]
     grader_score: float
     retrieval_attempts: int
+    final_answer: str | None
+    mode: str
+    depth: str
+    session_id: str | None
+    user_id: str
+    pii_session_id: str | None
+    user_profile: str  # SOTA: Episodic memory context
     reflexion_score: float
     reflexion_feedback: str | None
     reflexion_attempts: int
@@ -73,6 +84,8 @@ def load_policy():
         return {"compliance_rules": [], "reflexion_threshold": 0.8}
 
 
+# reflexions logic below
+@trace_node
 async def reflexion_node(state: AgentState) -> dict[str, Any]:
     """Review the final answer for compliance with policy.
 
@@ -142,7 +155,45 @@ Feedback: <Actionable advice>""",
         return {"reflexion_score": 1.0}  # Fail open if checker breaks, or strictly fail closed? Using fail open for now to avoid UX block.
 
 
-def route_after_reflexion(state: AgentState) -> str:
+        return {"reflexion_score": 1.0}  # Fail open if checker breaks, or strictly fail closed? Using fail open for now to avoid UX block.
+
+
+@trace_node
+async def load_memory_node(state: AgentState) -> dict[str, Any]:
+    """Load user profile from persistent memory (Mem0)."""
+    user_id = state.get("user_id", "default_user")
+    service = get_memory_service()
+    # Get all memories for generic profile, could also search based on query if available
+    profile = service.get_all(user_id)
+    
+    if profile:
+        logger.info("memory_loaded", user_id=user_id, length=len(profile))
+        
+    return {"user_profile": profile}
+
+
+@trace_node
+async def memorize_node(state: AgentState) -> dict[str, Any]:
+    """Extract and save new facts about the user using Mem0."""
+    user_id = state.get("user_id", "default_user")
+    messages = state["messages"]
+    
+    # Run in background (don't block response) - for now sync in graph
+    extractor = MemoryExtractor()
+    service = get_memory_service()
+    
+    try:
+        # Extract raw text interactions
+        interactions = await extractor.extract_from_messages(messages)
+        for interaction in interactions:
+            # Add to Mem0 (it handles vectorization and storage)
+            service.add(user_id, interaction)
+            logger.info("memory_saved_mem0")
+            
+    except Exception as e:
+        logger.error("memory_extraction_failed", error=str(e))
+        
+    return {}
     """Route based on reflexion score."""
     policy = load_policy()
     threshold = policy.get("reflexion_threshold", 0.8)
@@ -275,64 +326,48 @@ def create_llm(local: bool = True):
 # ============================================================================
 
 
+# Node Implementations
+# ============================================================================
+
+
+@trace_node
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
-    """Classify user intent.
-
-    Security Boundary: This node sees the raw user query.
-    Classification is done locally.
-
-    Node outputs:
-    - simple_chat: Direct response without retrieval
-    - complex_reasoning: Multi-step planning required
-    - rag_search: Document retrieval required
-    """
-    settings = get_settings()
+    """Classify user intent (String Version)."""
     llm = create_llm(local=True)
-
-    # Get the user's query (last human message)
     query = state["query"]
 
-    classification_prompt = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                """You are an intent classifier. Analyze the user's query and classify it into exactly one category.
+    # Simple prompt asking for specific keywords
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """Classify the user query into exactly one of these labels:
+- simple_chat (for greetings, casual talk)
+- complex_reasoning (for math, analysis)
+- rag_search (for facts, lookups)
 
-Categories:
-1. simple_chat - Casual conversation, greetings, simple questions that don't require external knowledge
-2. complex_reasoning - Questions requiring multi-step analysis, comparisons, calculations, or synthesis
-3. rag_search - Questions requiring specific document knowledge, facts, or information retrieval
-
-Respond with ONLY the category name, nothing else.""",
-            ),
-            ("human", "{query}"),
-        ]
-    )
+Reply ONLY with the label name. do not add punctuation."""),
+        ("human", "{query}")
+    ])
 
     try:
-        chain = classification_prompt | llm
+        chain = prompt | llm
         response = await chain.ainvoke({"query": query})
-        intent_str = response.content.strip().lower()
-
-        # Map to Intent enum
-        intent_map = {
-            "simple_chat": Intent.SIMPLE_CHAT,
-            "complex_reasoning": Intent.COMPLEX_REASONING,
-            "rag_search": Intent.RAG_SEARCH,
-        }
-
-        intent = intent_map.get(intent_str, Intent.SIMPLE_CHAT)
-
-        logger.info("intent_classified", intent=intent.value, query_length=len(query))
-
-        return {"intent": intent.value}
+        
+        # Clean output
+        # If response is AIMessage, get content. If str, use it.
+        raw_intent = response.content.strip().lower() if hasattr(response, "content") else str(response).strip().lower()
+        
+        # Validate
+        valid_intents = ["simple_chat", "complex_reasoning", "rag_search"]
+        intent_val = raw_intent if raw_intent in valid_intents else "rag_search"
+        
+        logger.info("intent_classified_str", intent=intent_val)
+        return {"intent": intent_val}
 
     except Exception as e:
-        logger.error("intent_classification_failed", error=str(e))
-        # Default to RAG search on failure (safer - will retrieve context)
-        return {"intent": Intent.RAG_SEARCH.value}
+        logger.error("intent_classification_failed_str", error=str(e))
+        return {"intent": "rag_search"}
 
 
+@trace_node
 async def planner_node(state: AgentState) -> dict[str, Any]:
     """Break complex queries into executable steps.
 
@@ -344,56 +379,32 @@ async def planner_node(state: AgentState) -> dict[str, Any]:
 
     query = state["query"]
 
+    # SOTA: Use structured output for planning
+    structured_llm = llm.with_structured_output(Plan)
+
     planning_prompt = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
                 """You are a query planner. Break down the user's complex question into a sequence of simpler steps.
-
 Rules:
-1. Each step should be a clear, actionable sub-question
-2. Steps should build on each other logically
-3. Maximum {max_steps} steps
-4. Return steps as a JSON array of strings
-
-Example:
-User: "Compare the economic impacts of renewable energy adoption in Germany vs USA"
-Steps: [
-    "What are the main renewable energy policies in Germany?",
-    "What are the economic impacts of these policies in Germany?",
-    "What are the main renewable energy policies in the USA?",
-    "What are the economic impacts of these policies in the USA?",
-    "Compare and synthesize the findings from both countries"
-]
-
-Return ONLY the JSON array, no other text.""",
+1. Steps should be clear and actionable.
+2. Steps should logically build on each other.
+3. Keep it under {max_steps} steps.""",
             ),
             ("human", "{query}"),
         ]
     )
 
     try:
-        chain = planning_prompt | llm
-        response = await chain.ainvoke(
+        chain = planning_prompt | structured_llm
+        result: Plan = await chain.ainvoke(
             {"query": query, "max_steps": settings.max_planning_steps}
         )
 
-        # Parse JSON response
-        content = response.content.strip()
-        # Handle markdown code blocks
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
+        logger.info("plan_created", step_count=len(result.steps))
 
-        steps = json.loads(content)
-
-        if not isinstance(steps, list) or not steps:
-            raise ValueError("Invalid plan format")
-
-        logger.info("plan_created", step_count=len(steps))
-
-        return {"plan": steps, "current_step": 0}
+        return {"plan": result.steps, "current_step": 0}
 
     except Exception as e:
         logger.error("planning_failed", error=str(e))
@@ -401,6 +412,11 @@ Return ONLY the JSON array, no other text.""",
         return {"plan": [query], "current_step": 0}
 
 
+        # Fallback: treat the query as a single step
+        return {"plan": [query], "current_step": 0}
+
+
+@trace_node
 async def retriever_node(state: AgentState) -> dict[str, Any]:
     """Retrieve relevant documents from the RAG engine.
 
@@ -444,6 +460,12 @@ async def retriever_node(state: AgentState) -> dict[str, Any]:
         return {"retrieved_docs": [], "retrieval_attempts": state.get("retrieval_attempts", 0) + 1}
 
 
+    except Exception as e:
+        logger.error("retrieval_failed", error=str(e))
+        return {"retrieved_docs": [], "retrieval_attempts": state.get("retrieval_attempts", 0) + 1}
+
+
+@trace_node
 async def grader_node(state: AgentState) -> dict[str, Any]:
     """Evaluate retrieved documents for relevance.
 
@@ -465,19 +487,9 @@ async def grader_node(state: AgentState) -> dict[str, Any]:
             (
                 "system",
                 """You are a relevance grader. Evaluate how well the retrieved documents answer the user's question.
-
-Score from 0.0 to 1.0:
-- 0.0-0.3: Documents are not relevant
-- 0.4-0.6: Documents are partially relevant
-- 0.7-0.9: Documents are mostly relevant
-- 1.0: Documents perfectly answer the question
-
-Documents:
-{documents}
-
-Return ONLY a decimal number between 0.0 and 1.0, nothing else.""",
+Be strict. If the document doesn't contain the specific information needed, mark it irrelevant.""",
             ),
-            ("human", "Question: {query}"),
+            ("human", "Question: {query}\n\nDocuments:\n{documents}"),
         ]
     )
 
@@ -487,17 +499,13 @@ Return ONLY a decimal number between 0.0 and 1.0, nothing else.""",
             [f"Document {i+1}:\n{doc['content']}" for i, doc in enumerate(docs[:5])]
         )
 
-        chain = grading_prompt | llm
-        response = await chain.ainvoke({"documents": docs_text, "query": query})
+        structured_llm = llm.with_structured_output(Grade)
+        chain = grading_prompt | structured_llm
+        result: Grade = await chain.ainvoke({"documents": docs_text, "query": query})
 
-        # Parse score
-        score_str = response.content.strip()
-        score = float(score_str)
-        score = max(0.0, min(1.0, score))  # Clamp to valid range
+        logger.info("grading_complete", score=result.score, relevant=result.is_relevant)
 
-        logger.info("grading_complete", score=score, threshold=settings.grader_relevance_threshold)
-
-        return {"grader_score": score}
+        return {"grader_score": result.score}
 
     except Exception as e:
         logger.error("grading_failed", error=str(e))
@@ -505,6 +513,10 @@ Return ONLY a decimal number between 0.0 and 1.0, nothing else.""",
         return {"grader_score": 0.5}
 
 
+        return {"grader_score": 0.5}
+
+
+@trace_node
 async def query_rewriter_node(state: AgentState) -> dict[str, Any]:
     """Rewrite query for better retrieval.
 
@@ -520,29 +532,30 @@ async def query_rewriter_node(state: AgentState) -> dict[str, Any]:
                 "system",
                 """You are a query optimizer. The previous search didn't find relevant documents.
 Rewrite the query to be more specific or use different keywords that might match better.
-
-Original query: {query}
-
-Return ONLY the rewritten query, nothing else.""",
+Also extract key terms.""",
             ),
-            ("human", "Rewrite this query for better search results."),
+            ("human", "Original Query: {query}\nRewrite this for better search results."),
         ]
     )
 
     try:
-        chain = rewrite_prompt | llm
-        response = await chain.ainvoke({"query": query})
-        new_query = response.content.strip()
+        structured_llm = llm.with_structured_output(RewriteQuery)
+        chain = rewrite_prompt | structured_llm
+        result: RewriteQuery = await chain.ainvoke({"query": query})
 
-        logger.info("query_rewritten", original_length=len(query), new_length=len(new_query))
+        logger.info("query_rewritten", original=query, new=result.rewritten_query)
 
-        return {"query": new_query}
+        return {"query": result.rewritten_query}
 
     except Exception as e:
         logger.error("query_rewrite_failed", error=str(e))
         return {}
 
 
+        return {}
+
+
+@trace_node
 async def generator_node(state: AgentState) -> dict[str, Any]:
     """Synthesize the final answer.
 
@@ -558,7 +571,7 @@ async def generator_node(state: AgentState) -> dict[str, Any]:
 
     query = state["query"]
     docs = state.get("retrieved_docs", [])
-    intent = state.get("intent", Intent.SIMPLE_CHAT.value)
+    intent = state.get("intent", IntentEnum.SIMPLE_CHAT.value)
 
     # Build context from retrieved documents
     context = ""
@@ -570,10 +583,13 @@ async def generator_node(state: AgentState) -> dict[str, Any]:
     # Select prompt based on intent and depth
     depth = state.get("depth", "fast")
 
-    if intent == Intent.SIMPLE_CHAT.value:
+    if intent == IntentEnum.SIMPLE_CHAT.value:
         system_prompt = """You are a helpful AI assistant. Respond naturally and conversationally."""
     elif depth == "deep_reasoning":
         system_prompt = """You are an expert analyst. You think step-by-step and provide thorough, well-reasoned answers.
+
+User Profile:
+{user_profile}
 
 When generating your response:
 1. First, analyze the key aspects of the question
@@ -587,6 +603,9 @@ Context (if provided):
     else:
         system_prompt = """You are a helpful AI assistant. Use the provided context to answer questions accurately and concisely.
 
+User Profile:
+{user_profile}
+
 Context:
 {context}"""
 
@@ -599,9 +618,13 @@ Context:
 
     try:
         chain = generation_prompt | llm
-        response = await chain.ainvoke({"query": query, "context": context})
+        response = await chain.ainvoke({
+            "query": query, 
+            "context": context,
+            "user_profile": state.get("user_profile", "")
+        })
         answer = response.content
-
+        
         # Audit log (hashes only)
         audit_log(
             "response_generated",
@@ -637,11 +660,15 @@ Context:
 
 def route_after_supervisor(state: AgentState) -> str:
     """Route based on classified intent."""
-    intent = state.get("intent", Intent.SIMPLE_CHAT.value)
+    intent = state.get("intent", IntentEnum.SIMPLE_CHAT.value)
+    # Defensive casting
+    if hasattr(intent, "value"):
+        intent = intent.value
+    intent = str(intent)
 
-    if intent == Intent.SIMPLE_CHAT.value:
+    if intent == IntentEnum.SIMPLE_CHAT.value:
         return "generator"
-    elif intent == Intent.COMPLEX_REASONING.value:
+    elif intent == IntentEnum.COMPLEX_REASONING.value:
         return "planner"
     else:  # RAG_SEARCH
         return "retriever"
@@ -694,15 +721,19 @@ def build_agent_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     # Add nodes
+    # Add nodes
+    graph.add_node("load_memory", load_memory_node)
     graph.add_node("supervisor", supervisor_node)
     graph.add_node("planner", planner_node)
     graph.add_node("retriever", retriever_node)
     graph.add_node("grader", grader_node)
     graph.add_node("query_rewriter", query_rewriter_node)
     graph.add_node("generator", generator_node)
+    graph.add_node("memorize", memorize_node)  # Parallel node
 
     # Set entry point
-    graph.set_entry_point("supervisor")
+    graph.set_entry_point("load_memory")
+    graph.add_edge("load_memory", "supervisor")
 
     # Add conditional edges
     graph.add_conditional_edges(
@@ -730,7 +761,9 @@ def build_agent_graph() -> StateGraph:
     graph.add_edge("query_rewriter", "retriever")
 
     # End after generator
-    graph.add_edge("generator", END)
+    # Run memorize in parallel or sequence? For graph simplicity, sequence for now.
+    graph.add_edge("generator", "memorize")
+    graph.add_edge("memorize", END)
 
     logger.info("agent_graph_built")
 
@@ -791,7 +824,9 @@ async def run_agent(
         "mode": mode,
         "depth": depth,
         "session_id": session_id,
+        "user_id": "default_user", # In real app, pass this in
         "pii_session_id": None,
+        "user_profile": "",
     }
 
     # Run the graph

@@ -148,16 +148,23 @@ class AuditDatabase:
         return [self._map_row(row) for row in rows]
 
     def _map_row(self, row: sqlite3.Row) -> AgentAction:
-        """Map a database row to an AgentAction object."""
+        # Helper to safely get column or fallback to None/Index
+        def get_col(r, key, idx):
+            try:
+                return r[key]
+            except (IndexError, ValueError):
+                # Fallback to index if available? Row objects mimic tuples
+                return r[idx] if idx < len(r) else None
+
         return AgentAction(
-            run_id=row["run_id"],
-            node=row["node"],
-            thought=row["thought"],
-            tool_call=row["tool_call"],
-            risk_score=row["risk_score"],
-            timestamp=datetime.fromisoformat(row["timestamp"]),
-            parent_hash=row["parent_hash"],
-            witness_signature=row["witness_signature"],
+            run_id=get_col(row, "run_id", 1),
+            node=get_col(row, "node", 2),
+            thought=get_col(row, "thought", 3),
+            tool_call=get_col(row, "tool_call", 5),
+            risk_score=get_col(row, "risk_score", 6),
+            timestamp=datetime.fromisoformat(get_col(row, "timestamp", 7)),
+            parent_hash=get_col(row, "parent_hash", 8),
+            witness_signature=get_col(row, "witness_signature", 9),
         )
 # ... [Keeping verify_chain method as is, assuming it uses map_row which we updated] ...
 
@@ -176,14 +183,18 @@ class AuditDatabase:
         
         for i, row in enumerate(rows):
             # 1. Check if parent_hash matches previous row's hash
-            if row["parent_hash"] != previous_hash:
-                print(f"Broken Chain at ID {row['id']}: Expected Parent {previous_hash}, Got {row['parent_hash']}")
+            # Row is sqlite3.Row, access by name should work if factory set
+            # fallback to index if needed, but let's debug
+            current_parent = row["parent_hash"] if "parent_hash" in row.keys() else row[7] # Fallback to index 7
+            
+            if current_parent != previous_hash:
+                print(f"Broken Chain at ID {row['id']}: Expected Parent {previous_hash}, Got {current_parent}")
                 return False
             
             # 2. Re-compute hash to check for content tampering
             action = self._map_row(row)
             # Important: Ensure the re-computed object has the correct parent_hash
-            action.parent_hash = row["parent_hash"] 
+            action.parent_hash = current_parent 
             
             recomputed_hash = action.compute_hash()
             

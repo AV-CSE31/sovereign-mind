@@ -117,6 +117,18 @@ class SovereignMindAPI {
         return res.json();
     }
 
+    async getMemory(userId: string): Promise<{ user_id: string; profile: string }> {
+        const res = await fetch(`${this.baseUrl}/v1/system/memory/${userId}`);
+        if (!res.ok) throw new Error('Failed to fetch memory');
+        return res.json();
+    }
+
+    async getTraces(limit: number = 50): Promise<{ traces: any[] }> {
+        const res = await fetch(`${this.baseUrl}/v1/system/traces?limit=${limit}`);
+        if (!res.ok) throw new Error('Failed to fetch traces');
+        return res.json();
+    }
+
     // Chat
     async chat(request: ChatRequest): Promise<ChatResponse> {
         const res = await fetch(`${this.baseUrl}/v1/chat/completions`, {
