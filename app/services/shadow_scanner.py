@@ -6,15 +6,14 @@ Detects unauthorized LLM processes running on the local network (Mock implementa
 from __future__ import annotations
 
 import socket
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
 
 
 @dataclass
 class ShadowAIRisk:
     """Represents a detected unauthorized AI process."""
+
     process_name: str
     port: int
     host: str
@@ -25,7 +24,7 @@ class ShadowAIRisk:
 
 class ShadowAIScanner:
     """Scanner for detecting unauthorized LLM processes."""
-    
+
     # Known LLM service ports
     KNOWN_LLM_PORTS = {
         11434: ("Ollama", "high"),
@@ -35,35 +34,37 @@ class ShadowAIScanner:
         3000: ("Open WebUI", "medium"),
         8000: ("Sovereign-Mind (expected)", "low"),
     }
-    
+
     def __init__(self):
-        self.last_scan: Optional[datetime] = None
+        self.last_scan: datetime | None = None
         self.cached_risks: list[ShadowAIRisk] = []
-    
+
     def scan_ports(self, host: str = "localhost") -> list[ShadowAIRisk]:
         """Scan for known LLM service ports."""
         risks: list[ShadowAIRisk] = []
-        
+
         for port, (name, risk_level) in self.KNOWN_LLM_PORTS.items():
             if self._is_port_open(host, port):
                 # Skip Sovereign-Mind's own port
                 if port == 8000:
                     continue
-                    
-                risks.append(ShadowAIRisk(
-                    process_name=name,
-                    port=port,
-                    host=host,
-                    risk_level=risk_level,
-                    detected_at=datetime.utcnow(),
-                    description=f"Detected {name} running on {host}:{port}. "
-                               f"This may be an unmanaged AI service.",
-                ))
-        
+
+                risks.append(
+                    ShadowAIRisk(
+                        process_name=name,
+                        port=port,
+                        host=host,
+                        risk_level=risk_level,
+                        detected_at=datetime.utcnow(),
+                        description=f"Detected {name} running on {host}:{port}. "
+                        f"This may be an unmanaged AI service.",
+                    )
+                )
+
         self.last_scan = datetime.utcnow()
         self.cached_risks = risks
         return risks
-    
+
     def _is_port_open(self, host: str, port: int, timeout: float = 0.5) -> bool:
         """Check if a port is open."""
         try:
@@ -72,13 +73,13 @@ class ShadowAIScanner:
             result = sock.connect_ex((host, port))
             sock.close()
             return result == 0
-        except socket.error:
+        except OSError:
             return False
-    
+
     def get_report(self) -> dict:
         """Get a summary report of shadow AI risks."""
         risks = self.cached_risks if self.cached_risks else self.scan_ports()
-        
+
         return {
             "last_scan": self.last_scan.isoformat() if self.last_scan else None,
             "total_risks": len(risks),
@@ -101,6 +102,7 @@ class ShadowAIScanner:
 
 # Singleton instance
 _scanner: ShadowAIScanner | None = None
+
 
 def get_shadow_scanner() -> ShadowAIScanner:
     """Get or create the shadow scanner singleton."""

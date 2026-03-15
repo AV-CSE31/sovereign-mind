@@ -14,33 +14,28 @@ Security Boundaries:
 - All prompts/responses are hashed for audit, never stored in plaintext
 """
 
+import contextlib
 import json
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Any, TypedDict
 
-from langchain_ollama import ChatOllama
-from app.core.schemas import Intent, IntentType, Plan, Grade, RewriteQuery
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
 from app.core.config import get_settings
-from app.core.exceptions import (
-    IntentClassificationError,
-    MaxRetriesExceeded,
-    PlanningError,
-)
-
 from app.core.logging import audit_log, get_logger, hash_for_audit
+from app.core.memory import MemoryExtractor, get_memory_service
+from app.core.schemas import Grade, Plan, RewriteQuery
 from app.core.tracing import trace_node
-from app.services.rag_engine import Document, get_retriever
-from app.core.memory import get_memory_service, MemoryExtractor
+from app.services.rag_engine import get_retriever
 
 logger = get_logger(__name__)
 
 
-class IntentEnum(str, Enum):
+class IntentEnum(StrEnum):
     """User intent classification."""
 
     SIMPLE_CHAT = "simple_chat"
@@ -78,7 +73,7 @@ class AgentState(TypedDict):
 def load_policy():
     """Load policy.json."""
     try:
-        with open("app/core/policy.json", "r") as f:
+        with open("app/core/policy.json") as f:
             return json.load(f)
     except FileNotFoundError:
         return {"compliance_rules": [], "reflexion_threshold": 0.8}
@@ -91,10 +86,10 @@ async def reflexion_node(state: AgentState) -> dict[str, Any]:
 
     Security Boundary: This node is the 'Self-Healing' governance layer.
     """
-    settings = get_settings()
+    get_settings()
     llm = create_llm(local=True)
     policy = load_policy()
-    
+
     answer = state.get("final_answer", "")
     if not answer:
         return {"reflexion_score": 1.0}
@@ -122,40 +117,43 @@ Feedback: <Actionable advice>""",
 
     try:
         chain = reflexion_prompt | llm
-        response = await chain.ainvoke({
-            "rules": rules_text, 
-            "threshold": policy.get("reflexion_threshold", 0.8),
-            "answer": answer
-        })
-        
+        response = await chain.ainvoke(
+            {
+                "rules": rules_text,
+                "threshold": policy.get("reflexion_threshold", 0.8),
+                "answer": answer,
+            }
+        )
+
         content = response.content.strip()
-        lines = content.split('\n')
+        lines = content.split("\n")
         score = 0.0
         feedback = "Compliance check failed format."
-        
+
         for line in lines:
             if line.startswith("Score:"):
-                try:
+                with contextlib.suppress(ValueError):
                     score = float(line.split(":")[1].strip())
-                except ValueError:
-                    pass
             elif line.startswith("Feedback:"):
                 feedback = line.split(":", 1)[1].strip()
 
         logger.info("reflexion_complete", score=score, feedback=feedback[:50])
-        
+
         return {
-            "reflexion_score": score, 
+            "reflexion_score": score,
             "reflexion_feedback": feedback,
-            "reflexion_attempts": state.get("reflexion_attempts", 0) + 1
+            "reflexion_attempts": state.get("reflexion_attempts", 0) + 1,
         }
 
     except Exception as e:
         logger.error("reflexion_failed", error=str(e))
-        return {"reflexion_score": 1.0}  # Fail open if checker breaks, or strictly fail closed? Using fail open for now to avoid UX block.
+        return {
+            "reflexion_score": 1.0
+        }  # Fail open if checker breaks, or strictly fail closed? Using fail open for now to avoid UX block.
 
-
-        return {"reflexion_score": 1.0}  # Fail open if checker breaks, or strictly fail closed? Using fail open for now to avoid UX block.
+        return {
+            "reflexion_score": 1.0
+        }  # Fail open if checker breaks, or strictly fail closed? Using fail open for now to avoid UX block.
 
 
 @trace_node
@@ -165,10 +163,10 @@ async def load_memory_node(state: AgentState) -> dict[str, Any]:
     service = get_memory_service()
     # Get all memories for generic profile, could also search based on query if available
     profile = service.get_all(user_id)
-    
+
     if profile:
         logger.info("memory_loaded", user_id=user_id, length=len(profile))
-        
+
     return {"user_profile": profile}
 
 
@@ -177,11 +175,11 @@ async def memorize_node(state: AgentState) -> dict[str, Any]:
     """Extract and save new facts about the user using Mem0."""
     user_id = state.get("user_id", "default_user")
     messages = state["messages"]
-    
+
     # Run in background (don't block response) - for now sync in graph
     extractor = MemoryExtractor()
     service = get_memory_service()
-    
+
     try:
         # Extract raw text interactions
         interactions = await extractor.extract_from_messages(messages)
@@ -189,17 +187,17 @@ async def memorize_node(state: AgentState) -> dict[str, Any]:
             # Add to Mem0 (it handles vectorization and storage)
             service.add(user_id, interaction)
             logger.info("memory_saved_mem0")
-            
+
     except Exception as e:
         logger.error("memory_extraction_failed", error=str(e))
-        
+
     return {}
     """Route based on reflexion score."""
     policy = load_policy()
     threshold = policy.get("reflexion_threshold", 0.8)
     score = state.get("reflexion_score", 1.0)
     attempts = state.get("reflexion_attempts", 0)
-    
+
     if score >= threshold:
         return END
     elif attempts >= 3:
@@ -214,80 +212,17 @@ async def append_warning_node(state: AgentState) -> dict[str, Any]:
     """Append a compliance warning if self-healing failed."""
     current_answer = state.get("final_answer", "")
     feedback = state.get("reflexion_feedback", "Compliance check failed.")
-    warning = f"\n\n[SYSTEM WARNING: This response may violate compliance policy. Feedback: {feedback}]"
-    
+    warning = (
+        f"\n\n[SYSTEM WARNING: This response may violate compliance policy. Feedback: {feedback}]"
+    )
+
     return {
         "final_answer": current_answer + warning,
-        "messages": [AIMessage(content=current_answer + warning)]
+        "messages": [AIMessage(content=current_answer + warning)],
     }
 
 
 # ... [Rest of routing functions] ...
-
-
-def build_agent_graph() -> StateGraph:
-    """Build the LangGraph agent with Plan-Execute-Grade-Refine loop.
-
-    Returns:
-        Compiled StateGraph.
-    """
-    # Create the graph
-    graph = StateGraph(AgentState)
-
-    # Add nodes
-    graph.add_node("supervisor", supervisor_node)
-    graph.add_node("planner", planner_node)
-    graph.add_node("retriever", retriever_node)
-    graph.add_node("grader", grader_node)
-    graph.add_node("query_rewriter", query_rewriter_node)
-    graph.add_node("generator", generator_node)
-    graph.add_node("reflexion", reflexion_node)
-    graph.add_node("append_warning", append_warning_node)
-
-    # Set entry point
-    graph.set_entry_point("supervisor")
-
-    # Add conditional edges
-    graph.add_conditional_edges(
-        "supervisor",
-        route_after_supervisor,
-        {
-            "generator": "generator",
-            "planner": "planner",
-            "retriever": "retriever",
-        },
-    )
-
-    graph.add_edge("planner", "retriever")
-    graph.add_edge("retriever", "grader")
-
-    graph.add_conditional_edges(
-        "grader",
-        route_after_grader,
-        {
-            "generator": "generator",
-            "query_rewriter": "query_rewriter",
-        },
-    )
-
-    graph.add_edge("query_rewriter", "retriever")
-    graph.add_edge("generator", "reflexion")
-    
-    graph.add_conditional_edges(
-        "reflexion",
-        route_after_reflexion,
-        {
-            END: END,
-            "generator": "generator",
-            "append_warning": "append_warning"
-        }
-    )
-    
-    graph.add_edge("append_warning", END)
-
-    logger.info("agent_graph_built")
-
-    return graph.compile()
 
 
 def create_llm(local: bool = True):
@@ -337,28 +272,37 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     query = state["query"]
 
     # Simple prompt asking for specific keywords
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """Classify the user query into exactly one of these labels:
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """Classify the user query into exactly one of these labels:
 - simple_chat (for greetings, casual talk)
 - complex_reasoning (for math, analysis)
 - rag_search (for facts, lookups)
 
-Reply ONLY with the label name. do not add punctuation."""),
-        ("human", "{query}")
-    ])
+Reply ONLY with the label name. do not add punctuation.""",
+            ),
+            ("human", "{query}"),
+        ]
+    )
 
     try:
         chain = prompt | llm
         response = await chain.ainvoke({"query": query})
-        
+
         # Clean output
         # If response is AIMessage, get content. If str, use it.
-        raw_intent = response.content.strip().lower() if hasattr(response, "content") else str(response).strip().lower()
-        
+        raw_intent = (
+            response.content.strip().lower()
+            if hasattr(response, "content")
+            else str(response).strip().lower()
+        )
+
         # Validate
         valid_intents = ["simple_chat", "complex_reasoning", "rag_search"]
         intent_val = raw_intent if raw_intent in valid_intents else "rag_search"
-        
+
         logger.info("intent_classified_str", intent=intent_val)
         return {"intent": intent_val}
 
@@ -411,7 +355,6 @@ Rules:
         # Fallback: treat the query as a single step
         return {"plan": [query], "current_step": 0}
 
-
         # Fallback: treat the query as a single step
         return {"plan": [query], "current_step": 0}
 
@@ -460,11 +403,6 @@ async def retriever_node(state: AgentState) -> dict[str, Any]:
         return {"retrieved_docs": [], "retrieval_attempts": state.get("retrieval_attempts", 0) + 1}
 
 
-    except Exception as e:
-        logger.error("retrieval_failed", error=str(e))
-        return {"retrieved_docs": [], "retrieval_attempts": state.get("retrieval_attempts", 0) + 1}
-
-
 @trace_node
 async def grader_node(state: AgentState) -> dict[str, Any]:
     """Evaluate retrieved documents for relevance.
@@ -472,7 +410,7 @@ async def grader_node(state: AgentState) -> dict[str, Any]:
     Security Boundary: This node evaluates local documents.
     If score < threshold, triggers re-query.
     """
-    settings = get_settings()
+    get_settings()
     llm = create_llm(local=True)
 
     docs = state.get("retrieved_docs", [])
@@ -496,7 +434,7 @@ Be strict. If the document doesn't contain the specific information needed, mark
     try:
         # Format documents for grading
         docs_text = "\n\n".join(
-            [f"Document {i+1}:\n{doc['content']}" for i, doc in enumerate(docs[:5])]
+            [f"Document {i + 1}:\n{doc['content']}" for i, doc in enumerate(docs[:5])]
         )
 
         structured_llm = llm.with_structured_output(Grade)
@@ -511,7 +449,6 @@ Be strict. If the document doesn't contain the specific information needed, mark
         logger.error("grading_failed", error=str(e))
         # Conservative: return low score to trigger retry
         return {"grader_score": 0.5}
-
 
         return {"grader_score": 0.5}
 
@@ -551,7 +488,6 @@ Also extract key terms.""",
         logger.error("query_rewrite_failed", error=str(e))
         return {}
 
-
         return {}
 
 
@@ -563,7 +499,7 @@ async def generator_node(state: AgentState) -> dict[str, Any]:
     Uses local LLM by default, cloud LLM only if mode=cloud_secure
     and data has been anonymized.
     """
-    settings = get_settings()
+    get_settings()
 
     # Determine which LLM to use
     use_local = state.get("mode", "local") == "local"
@@ -576,15 +512,15 @@ async def generator_node(state: AgentState) -> dict[str, Any]:
     # Build context from retrieved documents
     context = ""
     if docs:
-        context = "\n\n".join(
-            [f"Source {i+1}:\n{doc['content']}" for i, doc in enumerate(docs)]
-        )
+        context = "\n\n".join([f"Source {i + 1}:\n{doc['content']}" for i, doc in enumerate(docs)])
 
     # Select prompt based on intent and depth
     depth = state.get("depth", "fast")
 
     if intent == IntentEnum.SIMPLE_CHAT.value:
-        system_prompt = """You are a helpful AI assistant. Respond naturally and conversationally."""
+        system_prompt = (
+            """You are a helpful AI assistant. Respond naturally and conversationally."""
+        )
     elif depth == "deep_reasoning":
         system_prompt = """You are an expert analyst. You think step-by-step and provide thorough, well-reasoned answers.
 
@@ -618,13 +554,11 @@ Context:
 
     try:
         chain = generation_prompt | llm
-        response = await chain.ainvoke({
-            "query": query, 
-            "context": context,
-            "user_profile": state.get("user_profile", "")
-        })
+        response = await chain.ainvoke(
+            {"query": query, "context": context, "user_profile": state.get("user_profile", "")}
+        )
         answer = response.content
-        
+
         # Audit log (hashes only)
         audit_log(
             "response_generated",
@@ -649,7 +583,9 @@ Context:
 
     except Exception as e:
         logger.error("generation_failed", error=str(e))
-        error_response = "I apologize, but I encountered an error generating a response. Please try again."
+        error_response = (
+            "I apologize, but I encountered an error generating a response. Please try again."
+        )
         return {"final_answer": error_response, "messages": [AIMessage(content=error_response)]}
 
 
@@ -824,7 +760,7 @@ async def run_agent(
         "mode": mode,
         "depth": depth,
         "session_id": session_id,
-        "user_id": "default_user", # In real app, pass this in
+        "user_id": "default_user",  # In real app, pass this in
         "pii_session_id": None,
         "user_profile": "",
     }

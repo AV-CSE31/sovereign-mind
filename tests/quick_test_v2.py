@@ -1,6 +1,6 @@
 """Quick test script for v2 endpoints"""
+
 import requests
-import json
 
 BASE_URL = "http://localhost:8000"
 
@@ -53,9 +53,7 @@ except Exception as e:
 print("\n4. Testing Agent Execution...")
 try:
     response = requests.post(
-        f"{BASE_URL}/v1/agent/run",
-        data={"query": "What is encryption?"},
-        timeout=60
+        f"{BASE_URL}/v1/agent/run", data={"query": "What is encryption?"}, timeout=60
     )
     print(f"   Status: {response.status_code}")
     if response.status_code == 200:

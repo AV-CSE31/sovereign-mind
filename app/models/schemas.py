@@ -4,32 +4,31 @@ Pydantic models for API request/response validation.
 Strict type safety following API specification.
 """
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
-
 
 # ============================================================================
 # Enums
 # ============================================================================
 
 
-class ChatMode(str, Enum):
+class ChatMode(StrEnum):
     """Chat execution mode."""
 
     LOCAL = "local"
     CLOUD_SECURE = "cloud_secure"
 
 
-class ChatDepth(str, Enum):
+class ChatDepth(StrEnum):
     """Chat reasoning depth."""
 
     FAST = "fast"
     DEEP_REASONING = "deep_reasoning"
 
 
-class MessageRole(str, Enum):
+class MessageRole(StrEnum):
     """Chat message role."""
 
     SYSTEM = "system"
@@ -58,7 +57,7 @@ class ChatConfig(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     """Request for /v1/chat/completions endpoint.
-    
+
     Compatible with OpenAI API format for Open WebUI integration.
     """
 
@@ -69,7 +68,7 @@ class ChatCompletionRequest(BaseModel):
         description="Optional vault session ID for encrypted history",
     )
     stream: bool = Field(default=False, description="Enable streaming response")
-    
+
     # OpenAI-compatible fields (for Open WebUI)
     model: str | None = Field(default=None, description="Model name (OpenAI compat)")
     temperature: float | None = Field(default=None, description="Temperature")

@@ -1,7 +1,8 @@
-
 import asyncio
-import httpx
 import sys
+
+import httpx
+
 
 async def test_backend_connectivity():
     print("Testing Backend Connectivity...")
@@ -13,21 +14,24 @@ async def test_backend_connectivity():
                 print("[OK] Backend Swagger UI is reachable.")
             else:
                 print(f"[FAIL] Backend returned status {resp.status_code}")
-                
+
             # 2. Compliance Report (Public Endpoint)
             resp = await client.get("http://localhost:8000/v1/compliance/report", timeout=5.0)
             if resp.status_code == 200:
                 data = resp.json()
-                print(f"[OK] Compliance API is reachable. Total actions: {data.get('summary', {}).get('total_actions')}")
+                print(
+                    f"[OK] Compliance API is reachable. Total actions: {data.get('summary', {}).get('total_actions')}"
+                )
             else:
-                 print(f"[FAIL] Compliance API returned status {resp.status_code}")
+                print(f"[FAIL] Compliance API returned status {resp.status_code}")
 
         except httpx.ConnectError:
             print("[FAIL] Could not connect to localhost:8000. Is the backend running?")
             sys.exit(1)
         except Exception as e:
-            print(f"[ERROR] {str(e)}")
+            print(f"[ERROR] {e!s}")
             sys.exit(1)
+
 
 if __name__ == "__main__":
     if sys.platform == "win32":

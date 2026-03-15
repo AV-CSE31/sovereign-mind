@@ -9,12 +9,14 @@ All sensitive data must be hashed before logging.
 import hashlib
 import logging
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
-from structlog.types import Processor
 
 from app.core.config import get_settings
+
+if TYPE_CHECKING:
+    from structlog.types import Processor
 
 
 def hash_for_audit(data: str) -> str:
@@ -100,10 +102,7 @@ def configure_logging() -> None:
     if settings.debug:
         # Pretty printing for development
         structlog.configure(
-            processors=shared_processors
-            + [
-                structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-            ],
+            processors=[*shared_processors, structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
             logger_factory=structlog.stdlib.LoggerFactory(),
             wrapper_class=structlog.stdlib.BoundLogger,
             cache_logger_on_first_use=True,
@@ -115,10 +114,7 @@ def configure_logging() -> None:
     else:
         # JSON output for production
         structlog.configure(
-            processors=shared_processors
-            + [
-                structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
-            ],
+            processors=[*shared_processors, structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
             logger_factory=structlog.stdlib.LoggerFactory(),
             wrapper_class=structlog.stdlib.BoundLogger,
             cache_logger_on_first_use=True,
