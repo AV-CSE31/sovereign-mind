@@ -6,39 +6,48 @@ __pycache__/
 .Python
 *.egg-info/
 .eggs/
-
-# Virtual environments
-venv/
 .venv/
-ENV/
+venv/
 
 # IDE
 .vscode/
 .idea/
 *.swp
-*.swo
 
 # Environment
 .env
 .env.local
 
-# Data directories (mounted as volumes)
+# Data (mounted as volumes)
 data/
 
 # Git
 .git/
 .gitignore
 
-# Docker
+# Docker (don't include in context)
 Dockerfile
 docker-compose.yml
 .dockerignore
 
-# Documentation
+# Documentation (not needed in image)
+docs/
 *.md
 !README.md
 
-# Tests
+# Tests & Dev Tools
 tests/
-pytest_cache/
+scripts/debug/
 .coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pre-commit-config.yaml
+
+# Frontend (separate build)
+ui/
+
+# Logs
+logs/
+*.log

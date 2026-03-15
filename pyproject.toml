@@ -68,6 +68,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 target-version = "py311"
 line-length = 100
 src = ["app", "tests"]
+extend-exclude = ["scripts/"]
 
 [tool.ruff.lint]
 select = [

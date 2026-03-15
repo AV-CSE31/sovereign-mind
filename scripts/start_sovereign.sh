@@ -22,7 +22,7 @@ echo -e "\033[0;32m[*] Virtual environment activated.\033[0m"
 
 # 3. Install Requirements
 echo -e "\033[0;33m[*] Checking dependencies...\033[0m"
-pip install -r requirements.txt > /dev/null 2>&1
+pip install -e . > /dev/null 2>&1
 if [ $? -ne 0 ]; then
     echo -e "\033[0;31m[ERROR] Failed to install requirements.\033[0m"
     exit 1
@@ -55,7 +55,7 @@ cd ..
 # 7. Wait and Clean Up on Exit
 echo -e "\033[0;36m[*] Systems Nominal.\033[0m"
 echo "    > Backend: http://localhost:8000/docs"
-echo "    > Frontend: http://localhost:3000"
+echo "    > Frontend: http://localhost:3001"
 echo "    > Press Ctrl+C to stop."
 
 trap "kill $BACKEND_PID $FRONTEND_PID; exit" SIGINT SIGTERM

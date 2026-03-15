@@ -158,7 +158,7 @@ python -m venv .venv
 source .venv/bin/activate  # Linux/Mac
 # .venv\Scripts\activate   # Windows
 
-# Install everything (backend + frontend + dev tools + pre-commit hooks)
+# Install all dependencies (backend + frontend + dev tools + pre-commit hooks)
 make dev
 
 # Copy environment template
@@ -288,41 +288,56 @@ curl -X POST http://localhost:8000/v1/agent/run \
 
 ```
 sovereign-mind/
-├── app/
-│   ├── main.py                  # FastAPI app with lifespan + graceful shutdown
-│   ├── api/routes.py            # All API endpoints
-│   ├── core/
-│   │   ├── config.py            # Pydantic Settings (env validation)
-│   │   ├── agent_graph.py       # LangGraph state machine (The Brain)
-│   │   ├── security.py          # VaultManager (AES-256-GCM, Argon2id)
-│   │   ├── memory.py            # Mem0 episodic memory service
-│   │   ├── exceptions.py        # Custom exception hierarchy
-│   │   └── logging.py           # Structured logging with PII redaction
-│   ├── middleware/
-│   │   └── security.py          # Rate limiting, CSP headers, API auth
-│   ├── models/schemas.py        # Pydantic request/response models
-│   └── services/
-│       ├── rag_engine.py        # Hybrid retriever (Dense+Sparse+RRF+Rerank)
-│       ├── privacy_guard.py     # Presidio PII anonymization
-│       ├── knowledge_graph.py   # GraphRAG with NetworkX
-│       ├── audit_log.py         # Merkle chain audit trail
-│       ├── shadow_scanner.py    # Unauthorized AI detection
-│       └── zk_witness.py        # Zero-knowledge proof witness
-├── ui/                          # Next.js 16 frontend
-│   ├── src/
-│   │   ├── app/                 # App Router pages
-│   │   └── components/          # React components (Chat, Vault, Agents, etc.)
-│   ├── playwright.config.ts     # E2E testing config
-│   └── Dockerfile               # Multi-stage production build
-├── tests/                       # pytest suite (20 test files)
-├── docs/adr/                    # Architecture Decision Records
-├── .github/workflows/ci.yml     # CI: lint, typecheck, test, build, security
-├── pyproject.toml               # Python config (Ruff, mypy, pytest, coverage)
-├── Makefile                     # Dev commands (make dev, make ci, make test)
-├── docker-compose.yml           # 3-service deployment
-├── CONTRIBUTING.md              # Developer guide
-├── CHANGELOG.md                 # Release history
-└── LICENSE                      # MIT
+├── app/                           # Backend application
+│   ├── main.py                    #   FastAPI app with lifespan + graceful shutdown
+│   ├── api/routes.py              #   All API endpoints
+│   ├── core/                      #   Core logic
+│   │   ├── config.py              #     Pydantic Settings (env validation)
+│   │   ├── agent_graph.py         #     LangGraph state machine (The Brain)
+│   │   ├── security.py            #     VaultManager (AES-256-GCM, Argon2id)
+│   │   ├── memory.py              #     Mem0 episodic memory service
+│   │   ├── exceptions.py          #     Custom exception hierarchy
+│   │   └── logging.py             #     Structured logging with PII redaction
+│   ├── middleware/security.py     #   Rate limiting, CSP headers, API auth
+│   ├── models/schemas.py          #   Pydantic request/response models
+│   └── services/                  #   Business logic
+│       ├── rag_engine.py          #     Hybrid retriever (Dense+Sparse+RRF+Rerank)
+│       ├── privacy_guard.py       #     Presidio PII anonymization
+│       ├── knowledge_graph.py     #     GraphRAG with NetworkX
+│       ├── audit_log.py           #     Merkle chain audit trail
+│       ├── shadow_scanner.py      #     Unauthorized AI detection
+│       └── zk_witness.py          #     Zero-knowledge proof witness
+│
+├── ui/                            # Next.js 16 frontend
+│   ├── src/app/                   #   App Router pages
+│   ├── src/components/            #   React components (Chat, Vault, Agents, etc.)
+│   ├── playwright.config.ts       #   E2E testing config
+│   └── Dockerfile                 #   Multi-stage production build
+│
+├── tests/                         # pytest test suite
+│   ├── test_e2e.py                #   End-to-end API tests
+│   ├── test_audit_integrity.py    #   Vault/encryption tests
+│   ├── test_reflexion.py          #   Agent reflexion tests
+│   └── ...                        #   Module-specific tests
+│
+├── scripts/                       # Utility scripts
+│   ├── start_sovereign.sh         #   Linux launcher
+│   ├── start_sovereign.ps1        #   Windows launcher
+│   ├── download_model.py          #   Model downloader
+│   └── debug/                     #   Debug & verification scripts
+│
+├── docs/                          # Documentation
+│   ├── adr/                       #   Architecture Decision Records
+│   └── internal/                  #   Strategy docs (pivot, market analysis)
+│
+├── .github/workflows/ci.yml      # CI: lint, typecheck, test, build, security
+├── pyproject.toml                 # Python config (deps, Ruff, mypy, pytest)
+├── Makefile                       # Dev commands (make dev, make ci, make test)
+├── docker-compose.yml             # 3-service deployment
+├── .pre-commit-config.yaml        # Pre-commit hooks
+├── CONTRIBUTING.md                # Developer guide
+├── CHANGELOG.md                   # Release history
+└── LICENSE                        # MIT
 ```
 
 ---

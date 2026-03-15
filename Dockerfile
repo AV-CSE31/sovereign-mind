@@ -8,14 +8,14 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency files first for better caching
-COPY pyproject.toml requirements.txt ./
-
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy project metadata and install dependencies first (cache layer)
+COPY pyproject.toml ./
+COPY app/__init__.py ./app/
+RUN pip install --no-cache-dir .
 
 # Copy application code
 COPY . .
+RUN pip install --no-cache-dir --no-deps .
 
 # Create data directories
 RUN mkdir -p data/vault data/chroma data/audit data/temp logs/traces
