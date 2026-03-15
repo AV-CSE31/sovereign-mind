@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { AppProvider } from "@/lib/context";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 
 const inter = Inter({
   variable: "--font-inter",
@@ -23,9 +24,11 @@ export default function RootLayout({
       <body
         className={`${inter.variable} font-sans antialiased bg-zinc-950 text-white`}
       >
-        <AppProvider>
-          {children}
-        </AppProvider>
+        <ErrorBoundary>
+          <AppProvider>
+            {children}
+          </AppProvider>
+        </ErrorBoundary>
       </body>
     </html>
   );

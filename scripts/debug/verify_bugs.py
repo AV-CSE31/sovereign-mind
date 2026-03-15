@@ -1,12 +1,13 @@
-
 import asyncio
-import httpx
 import sys
+
+import httpx
+
 
 async def verify_fixes():
     base_url = "http://localhost:8000"
     print(f"Testing against {base_url}...")
-    
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         # 1. Verify compliance/verify (was crashing due to missing datetime)
         print("\n--- Verifying Compliance Integrity ---")
@@ -29,9 +30,9 @@ async def verify_fixes():
                 for m in models:
                     print(f"  - {m['id']}")
                 if len(models) == 1:
-                     print("[PASS] Only 1 model listed as requested.")
+                    print("[PASS] Only 1 model listed as requested.")
                 else:
-                     print("[WARN] More than 1 model listed.")
+                    print("[WARN] More than 1 model listed.")
             else:
                 print(f"[FAIL] Models: {resp.status_code}")
         except Exception as e:
@@ -42,15 +43,16 @@ async def verify_fixes():
         try:
             form_data = {
                 "content": "This is a test document for verification.",
-                "metadata": '{"source": "verification_script"}'
+                "metadata": '{"source": "verification_script"}',
             }
             resp = await client.post(f"{base_url}/v1/system/ingest", data=form_data)
             if resp.status_code == 200:
-                 print(f"[PASS] Ingestion: {resp.json()}")
+                print(f"[PASS] Ingestion: {resp.json()}")
             else:
-                 print(f"[FAIL] Ingestion: {resp.status_code} - {resp.text}")
+                print(f"[FAIL] Ingestion: {resp.status_code} - {resp.text}")
         except Exception as e:
-             print(f"[ERROR] Ingestion: {e}")
+            print(f"[ERROR] Ingestion: {e}")
+
 
 if __name__ == "__main__":
     if sys.platform == "win32":

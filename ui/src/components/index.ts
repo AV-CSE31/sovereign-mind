@@ -6,4 +6,5 @@ export { SettingsPanel } from './SettingsPanel';
 export { AgentDashboard } from './AgentDashboard';
 export { CompliancePanel } from './CompliancePanel';
 export { ShadowAIPanel } from './ShadowAIPanel';
+export { ErrorBoundary } from './ErrorBoundary';
 

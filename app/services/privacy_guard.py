@@ -21,7 +21,6 @@ from typing import Any
 
 from presidio_analyzer import AnalyzerEngine, RecognizerResult
 from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig
 
 from app.core.config import get_settings
 from app.core.exceptions import (
@@ -274,7 +273,7 @@ class AnonymizationService:
         logger.info(
             "pii_detection_complete",
             entity_count=len(entities),
-            entity_types=list(set(e.entity_type for e in entities)),
+            entity_types=list({e.entity_type for e in entities}),
         )
 
         return entities

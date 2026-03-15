@@ -20,12 +20,11 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
-import httpx
 from chromadb.config import Settings as ChromaSettings
 from rank_bm25 import BM25Okapi
 
 from app.core.config import get_settings
-from app.core.exceptions import DocumentIngestionError, RerankingError, RetrievalError
+from app.core.exceptions import DocumentIngestionError, RetrievalError
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -33,13 +32,14 @@ logger = get_logger(__name__)
 # Optional FlashRank import
 try:
     from flashrank import Ranker, RerankRequest
+
     FLASHRANK_AVAILABLE = True
 except ImportError:
     FLASHRANK_AVAILABLE = False
     logger.warning("flashrank_not_available", message="Reranking will be disabled")
 
 # Import Graph RAG components
-from app.services.knowledge_graph import GraphExtractor, get_graph_store, LocalGraphStore
+from app.services.knowledge_graph import GraphExtractor, get_graph_store
 
 
 @dataclass
@@ -70,7 +70,7 @@ class RetrievalResult:
 
 class HuggingFaceEmbeddings:
     """Local embeddings using SentenceTransformer (HuggingFace).
-    
+
     Security Boundary: Embeddings are generated entirely locally on CPU/GPU.
     No data leaves the device.
     """
@@ -78,6 +78,7 @@ class HuggingFaceEmbeddings:
     def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
         try:
             from sentence_transformers import SentenceTransformer
+
             self.model = SentenceTransformer(model_name)
         except ImportError:
             raise ImportError("sentence-transformers not installed. Please install it.")
@@ -108,7 +109,9 @@ class DocumentChunker:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
 
-    def chunk_text(self, text: str, doc_id: str, metadata: dict[str, Any] | None = None) -> list[Document]:
+    def chunk_text(
+        self, text: str, doc_id: str, metadata: dict[str, Any] | None = None
+    ) -> list[Document]:
         """Split text into overlapping chunks.
 
         Args:
@@ -196,9 +199,7 @@ class HybridRetriever:
         )
 
         # Initialize embeddings (local)
-        self._embedder = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
-        )
+        self._embedder = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
         # BM25 index (sparse retrieval) - rebuilt as needed
         self._bm25_corpus: list[list[str]] = []
@@ -209,7 +210,9 @@ class HybridRetriever:
         self._reranker: Ranker | None = None
         if FLASHRANK_AVAILABLE:
             try:
-                self._reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2", cache_dir="./data/flashrank")
+                self._reranker = Ranker(
+                    model_name="ms-marco-MiniLM-L-12-v2", cache_dir="./data/flashrank"
+                )
                 logger.info("reranker_initialized", model="ms-marco-MiniLM-L-12-v2")
             except Exception as e:
                 logger.warning("reranker_init_failed", error=str(e))
@@ -304,7 +307,9 @@ class HybridRetriever:
                 summary_text = "\n".join(chunk_texts[:3])
                 graph_data = await extractor.extract(summary_text)
                 self._graph_store.add_triplets(graph_data, source_doc_id=doc_id)
-                logger.info("graph_ingestion_complete", doc_id=doc_id, nodes=len(graph_data.entities))
+                logger.info(
+                    "graph_ingestion_complete", doc_id=doc_id, nodes=len(graph_data.entities)
+                )
             except Exception as ge:
                 logger.warning("graph_ingestion_partial_fail", error=str(ge))
 
@@ -312,7 +317,7 @@ class HybridRetriever:
                 "document_ingested",
                 doc_id=doc_id,
                 chunk_count=len(chunks),
-                graph_nodes=len(graph_data.entities) if 'graph_data' in locals() else 0
+                graph_nodes=len(graph_data.entities) if "graph_data" in locals() else 0,
             )
 
             return len(chunks)
@@ -461,7 +466,7 @@ class HybridRetriever:
 
     def _graph_search(self, query: str, top_k: int) -> list[Document]:
         """Perform GraphRAG search by extracting entities from query and finding neighbors.
-        
+
         SOTA: Returns 'synthetic' documents constructed from graph triplets.
         """
         try:
@@ -469,25 +474,25 @@ class HybridRetriever:
             # For speed, we just split by space and look for node matches
             # Ideally, use the Extractor on the query itself
             keywords = [w.lower() for w in query.split() if list(filter(str.isalnum, w))]
-            
+
             # Get context from graph
             triplets = self._graph_store.get_context(keywords, depth=1)
-            
+
             if not triplets:
                 return []
-                
+
             # Create a synthetic document summarizing the graph connections
-            content = "Graph Knowledge:\n" + "\n".join(triplets[:top_k*2])
-            
+            content = "Graph Knowledge:\n" + "\n".join(triplets[: top_k * 2])
+
             doc = Document(
                 id=f"graph_{hashlib.md5(query.encode()).hexdigest()[:8]}",
                 content=content,
                 metadata={"source": "knowledge_graph", "type": "triplets"},
-                score=1.0 # High confidence for explicit facts
+                score=1.0,  # High confidence for explicit facts
             )
-            
+
             return [doc]
-            
+
         except Exception as e:
             logger.warning("graph_search_failed", error=str(e))
             return []
@@ -496,7 +501,7 @@ class HybridRetriever:
         self,
         dense_results: list[Document],
         sparse_results: list[Document],
-        graph_results: list[Document] = None, # Added graph results
+        graph_results: list[Document] | None = None,  # Added graph results
         k: int = 60,
     ) -> list[Document]:
         """Combine dense and sparse results using Reciprocal Rank Fusion.
@@ -607,9 +612,7 @@ class HybridRetriever:
             # Step 4: Reciprocal Rank Fusion
             # Merge all three
             fused_results = self._reciprocal_rank_fusion(
-                dense_results, 
-                sparse_results, 
-                graph_results
+                dense_results, sparse_results, graph_results
             )
 
             # Step 4: Rerank top candidates

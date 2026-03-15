@@ -51,9 +51,9 @@ class Settings(BaseSettings):
     # ========================================================================
     # LLM Settings (Local-First Default)
     # ========================================================================
-    # Local LLM (ollama/llamafile)
-    ollama_base_url: str = "http://localhost:8080"
-    ollama_model: str = "TinyLlama-1.1B-Chat-v1.0.Q5_K_M"
+    # Local LLM (ollama/llamafile) — qwen2.5:7b minimum for reliable agentic reasoning
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
     ollama_timeout: int = 120
 
     # Cloud LLM (fallback)
@@ -71,8 +71,8 @@ class Settings(BaseSettings):
     chroma_persist_directory: str = "./data/chroma"
     chroma_collection_name: str = "sovereign_mind_docs"
 
-    # Embedding model (local)
-    embedding_model: str = "nomic-embed-text"
+    # Embedding model (local) — mxbai-embed-large for better retrieval quality
+    embedding_model: str = "mxbai-embed-large"
 
     # Retrieval settings
     dense_top_k: int = 25  # Initial dense retrieval
@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     # Chunking settings
     chunk_size: int = 512
     chunk_overlap: int = 50
+    chunking_strategy: Literal["fixed", "semantic"] = "fixed"
 
     # ========================================================================
     # Privacy Settings (Module D: The Filter)
@@ -102,6 +103,14 @@ class Settings(BaseSettings):
     max_retrieval_retries: int = 3
     grader_relevance_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     max_planning_steps: int = 5
+
+    # ========================================================================
+    # Security Middleware Settings
+    # ========================================================================
+    # Optional API key for production (empty = disabled)
+    api_key: str | None = None
+    # Rate limit (requests per minute per IP)
+    rate_limit: str = "60/minute"
 
 
 @lru_cache

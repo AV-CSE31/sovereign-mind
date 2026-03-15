@@ -8,6 +8,8 @@ Enterprise-Grade Private AI Assistant with:
 - Privacy-first design (PII anonymization)
 """
 
+import signal
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -16,13 +18,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
+from app.middleware.security import setup_middleware
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager.
 
-    Handles startup and shutdown events.
+    Handles startup and shutdown events with graceful signal handling.
     """
     # Startup
     configure_logging()
@@ -31,11 +34,12 @@ async def lifespan(app: FastAPI):
 
     # Ensure data directories exist
     import os
+
     data_dirs = [
         settings.vault_storage_path,
         settings.audit_log_path,
         settings.chroma_persist_directory,
-        "./data/temp"
+        "./data/temp",
     ]
     for d in data_dirs:
         os.makedirs(d, exist_ok=True)
@@ -48,15 +52,19 @@ async def lifespan(app: FastAPI):
     )
 
     # Start Local Inference Engine if needed
-    # We only start it if we are in 'local' mode and not running inside Docker 
-    # (assuming Docker handles its own services, though for single-container deployments this logic might hold)
     from app.core.inference_engine import get_inference_engine
+
     engine = get_inference_engine()
-    
-    # Simple heuristic: If we configured a local URL that matches our engine's default, try to start it.
+
     if "localhost" in settings.ollama_base_url or "127.0.0.1" in settings.ollama_base_url:
-         # Non-blocking start
-         engine.start()
+        engine.start()
+
+    # Graceful shutdown handler
+    def handle_shutdown(signum, frame):
+        logger.info("received_shutdown_signal", signal=signum)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_shutdown)
 
     yield
 
@@ -65,20 +73,18 @@ async def lifespan(app: FastAPI):
 
     # Clean up resources
     from app.services.rag_engine import _retriever
-    
+
     if _retriever is not None:
         await _retriever.close()
-        
+
     if engine:
         engine.stop()
 
+    logger.info("application_shutdown_complete")
+
 
 def create_app() -> FastAPI:
-    """Create and configure the FastAPI application.
-
-    Returns:
-        Configured FastAPI app.
-    """
+    """Create and configure the FastAPI application."""
     settings = get_settings()
 
     app = FastAPI(
@@ -90,18 +96,12 @@ def create_app() -> FastAPI:
         redoc_url="/redoc" if settings.debug else None,
     )
 
-    @app.get("/")
-    async def root():
-        return {
-            "message": "Sovereign-Mind API is Online.",
-            "docs": "/docs",
-            "ui": "http://localhost:3000"
-        }
-
-    # CORS middleware
+    # CORS middleware — explicit origin allowlisting
     origins = [
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
     ]
     if settings.debug:
         origins.append("*")
@@ -110,12 +110,23 @@ def create_app() -> FastAPI:
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Content-Type", "Authorization", "X-API-Key"],
     )
+
+    # Security middleware (rate limiting, headers, auth, timing)
+    setup_middleware(app)
 
     # Include API routes
     app.include_router(router)
+
+    @app.get("/")
+    async def root():
+        return {
+            "message": "Sovereign-Mind API is Online.",
+            "docs": "/docs",
+            "ui": "http://localhost:3001",
+        }
 
     return app
 

@@ -14,12 +14,10 @@ Security Boundaries:
 """
 
 import base64
-import hashlib
 import json
-import os
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +74,7 @@ class WrappedDEK:
     """
 
     encrypted_dek: EncryptedData
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
@@ -105,8 +103,8 @@ class ChatSession:
     session_id: str
     wrapped_dek: WrappedDEK
     encrypted_messages: list[EncryptedData] = field(default_factory=list)
-    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary."""
@@ -396,13 +394,13 @@ class VaultManager:
             {
                 "role": role,
                 "content": content,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         ).encode("utf-8")
 
         encrypted_message = self._encrypt(dek, message_data)
         session.encrypted_messages.append(encrypted_message)
-        session.updated_at = datetime.now(timezone.utc).isoformat()
+        session.updated_at = datetime.now(UTC).isoformat()
 
         # Persist session
         self._save_session(session)
@@ -467,14 +465,12 @@ class VaultManager:
 
         for session_file in self._vault_path.glob("*.json"):
             try:
-                with open(session_file, "r", encoding="utf-8") as f:
+                with open(session_file, encoding="utf-8") as f:
                     data = json.load(f)
                 session = ChatSession.from_dict(data)
                 self._sessions[session.session_id] = session
             except Exception as e:
-                logger.warning(
-                    "session_load_failed", file=str(session_file), error=str(e)
-                )
+                logger.warning("session_load_failed", file=str(session_file), error=str(e))
 
     def list_sessions(self) -> list[dict[str, Any]]:
         """List all sessions (metadata only, no content).

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.core.agent_graph import run_agent
@@ -25,6 +26,7 @@ from app.core.exceptions import (
     VaultLockedError,
 )
 from app.core.logging import get_logger
+from app.core.memory import get_memory_service
 from app.core.security import get_vault
 from app.models.schemas import (
     ChatChoice,
@@ -35,7 +37,6 @@ from app.models.schemas import (
     CollectionStats,
     ErrorResponse,
     HealthResponse,
-    IngestRequest,
     IngestResponse,
     MessageRole,
     SessionInfo,
@@ -43,10 +44,6 @@ from app.models.schemas import (
 )
 from app.services.privacy_guard import get_anonymization_service
 from app.services.rag_engine import get_retriever
-
-from app.services.rag_engine import get_retriever
-from app.core.memory import get_memory_service
-from app.core.tracing import get_tracer
 
 logger = get_logger(__name__)
 
@@ -109,20 +106,19 @@ async def chat_completions(request: ChatCompletionRequest):
     pii_session_id = None
     original_query = query
 
-    if request.config.mode == ChatMode.CLOUD_SECURE:
-        if settings.block_pii_on_cloud:
-            try:
-                # Anonymize query before sending to cloud
-                query, pii_session_id = privacy_service.anonymize(query)
-                logger.info(
-                    "query_anonymized_for_cloud",
-                    pii_session_id=pii_session_id,
-                )
-            except PrivacyThresholdExceeded as e:
-                raise HTTPException(
-                    status_code=status.HTTP_451_UNAVAILABLE_FOR_LEGAL_REASONS,
-                    detail=str(e),
-                )
+    if request.config.mode == ChatMode.CLOUD_SECURE and settings.block_pii_on_cloud:
+        try:
+            # Anonymize query before sending to cloud
+            query, pii_session_id = privacy_service.anonymize(query)
+            logger.info(
+                "query_anonymized_for_cloud",
+                pii_session_id=pii_session_id,
+            )
+        except PrivacyThresholdExceeded as e:
+            raise HTTPException(
+                status_code=status.HTTP_451_UNAVAILABLE_FOR_LEGAL_REASONS,
+                detail=str(e),
+            )
 
     # Convert request messages to LangChain format
     messages = []
@@ -147,7 +143,7 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.error("agent_execution_failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Agent execution failed: {str(e)}",
+            detail=f"Agent execution failed: {e!s}",
         )
 
     # Get the response
@@ -168,7 +164,9 @@ async def chat_completions(request: ChatCompletionRequest):
     response = ChatCompletionResponse(
         id=f"chatcmpl-{secrets.token_hex(12)}",
         created=int(time.time()),
-        model=settings.ollama_model if request.config.mode == ChatMode.LOCAL else settings.openai_model,
+        model=settings.ollama_model
+        if request.config.mode == ChatMode.LOCAL
+        else settings.openai_model,
         choices=[
             ChatChoice(
                 index=0,
@@ -458,7 +456,7 @@ async def delete_session(session_id: str):
 
 @router.get("/v1/system/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint.
+    """Health check endpoint (detailed status).
 
     Returns:
         HealthResponse with system status.
@@ -477,9 +475,27 @@ async def health_check():
     )
 
 
+@router.get("/v1/system/liveness")
+async def liveness_probe():
+    """Kubernetes-style liveness probe. Returns 200 if the process is alive."""
+    return {"status": "alive"}
+
+
+@router.get("/v1/system/readiness")
+async def readiness_probe():
+    """Kubernetes-style readiness probe. Checks if the app can serve traffic."""
+    try:
+        retriever = get_retriever()
+        retriever.get_collection_stats()
+        return {"status": "ready"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "not ready"})
+
+
 # ============================================================================
 # Memory & Observability Endpoints (SOTA Dashboard)
 # ============================================================================
+
 
 @router.get("/v1/system/memory/{user_id}")
 async def get_user_memory(user_id: str):
@@ -500,24 +516,25 @@ async def get_system_traces(limit: int = 50):
         trace_file = Path("./logs/traces/traces.jsonl")
         if not trace_file.exists():
             return {"traces": []}
-            
+
         # collaborative reading of last N lines (simplistic)
         lines = trace_file.read_text(encoding="utf-8").strip().split("\n")
         recent = lines[-limit:]
-        
+
         parsed = []
         for line in recent:
             try:
                 import json
+
                 parsed.append(json.loads(line))
-            except:
+            except (json.JSONDecodeError, ValueError):
                 continue
-                
+
         # Return reversed (newest first)
         return {"traces": parsed[::-1]}
     except Exception as e:
-         logger.error("trace_fetch_failed", error=str(e))
-         return {"traces": []}
+        logger.error("trace_fetch_failed", error=str(e))
+        return {"traces": []}
 
 
 # ============================================================================
@@ -560,89 +577,86 @@ async def run_agent_endpoint(
     session_id: str | None = Form(None),
 ):
     """Execute the agentic research pipeline.
-    
+
     This runs the LangGraph agent with:
     - Intent classification
-    - Document retrieval  
+    - Document retrieval
     - Grading and query refinement
     - Answer generation
-    
+
     Returns the answer and metadata.
     """
-    from app.core.minion_orchestrator import get_minion_orchestrator, ContextSyncError
-    from app.services.audit_log import AuditLogger, AgentAction
-    from datetime import datetime
     import uuid
-    
+    from datetime import datetime
+
+    from app.core.minion_orchestrator import ContextSyncError, get_minion_orchestrator
+    from app.services.audit_log import AgentAction, AuditLogger
+
     # Use Minion Orchestrator for hybrid execution
     orchestrator = get_minion_orchestrator()
-    
+
     try:
         # Phase 1: Orchestration & Execution
-        result = await orchestrator.orchestrate(
-            query=query,
-            session_id=session_id
-        )
-        
+        result = await orchestrator.orchestrate(query=query, session_id=session_id)
+
         # Phase 2: Auditing
         run_id = str(uuid.uuid4())
-        
+
         action = AgentAction(
             run_id=run_id,
             node="minion_orchestrator",
             thought=f"Hybrid execution completed. Plan steps: {len(result.get('plan', {}).get('steps', []))}",
             tool_call=None,
             risk_score=0.1,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.utcnow(),
         )
         await AuditLogger.log(action)
-        
+
         return {
             "success": True,
             "answer": result["answer"],
-            "intent": "hybrid_inference", 
-            "documents_used": 0, # TODO: Aggregate from sub-tasks
-            "compliance_passed": True, 
+            "intent": "hybrid_inference",
+            "documents_used": 0,  # TODO: Aggregate from sub-tasks
+            "compliance_passed": True,
             "retries": 0,
             "run_id": run_id,
-            "audit_trail": [{
-                "run_id": run_id,
-                "node": "minion_orchestrator",
-                "thought": action.thought,
-                "tool_call": None,
-                "risk_score": 0.1,
-                "timestamp": action.timestamp.isoformat(),
-                "witness_signature": action.witness_signature # Include signature in response
-            }]
+            "audit_trail": [
+                {
+                    "run_id": run_id,
+                    "node": "minion_orchestrator",
+                    "thought": action.thought,
+                    "tool_call": None,
+                    "risk_score": 0.1,
+                    "timestamp": action.timestamp.isoformat(),
+                    "witness_signature": action.witness_signature,  # Include signature in response
+                }
+            ],
         }
-        
+
     except ContextSyncError as e:
         logger.error("minion_sync_failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Cloud/Local Context Mismatch: {str(e)}. Please perform full sync."
+            detail=f"Cloud/Local Context Mismatch: {e!s}. Please perform full sync.",
         )
     except Exception as e:
         logger.error("minion_execution_failed", error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @router.get("/v1/agent/run/{run_id}")
 async def get_agent_run(run_id: str):
     """Get the audit trail for a specific agent run."""
     from app.services.audit_log import AuditLogger
-    
+
     actions = await AuditLogger.get_run_actions(run_id)
-    
+
     if not actions:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Run {run_id} not found",
         )
-    
+
     return {
         "run_id": run_id,
         "actions": [a.model_dump() for a in actions],
@@ -657,47 +671,47 @@ async def get_agent_run(run_id: str):
 @router.get("/v1/compliance/logs")
 async def get_compliance_logs(limit: int = 100):
     """Get recent compliance audit logs.
-    
+
     Returns the most recent agent actions across all runs.
     """
     from app.services.audit_log import AuditLogger
-    
+
     actions = await AuditLogger.get_recent_actions(limit=limit)
-    
+
     return {
         "total": len(actions),
         "actions": [a.model_dump() for a in actions],
     }
 
 
-
 @router.get("/v1/compliance/verify")
 async def verify_compliance_integrity():
     """Verify the cryptographic integrity of the audit logs.
-    
+
     This performs an on-the-fly verification of the Merkle Chain.
     """
     from app.services.audit_log import AuditLogger
-    
+
     is_valid = await AuditLogger.verify_integrity()
-    
+
     return {
         "integrity_verified": is_valid,
         "verified_at": datetime.utcnow().isoformat(),
-        "integrity_check": "passed" if is_valid else "failed"
+        "integrity_check": "passed" if is_valid else "failed",
     }
+
 
 @router.get("/v1/compliance/report")
 async def generate_compliance_report():
     """Generate a compliance report.
-    
+
     Returns aggregate statistics and recent actions for
     EU AI Act / SOC 2 compliance reporting.
     """
     from app.services.audit_log import AuditLogger
-    
+
     report = await AuditLogger.generate_report()
-    
+
     return {
         "generated_at": report.generated_at.isoformat(),
         "summary": {
@@ -718,14 +732,13 @@ async def generate_compliance_report():
 @router.get("/v1/system/shadow-scan")
 async def scan_shadow_ai():
     """Scan for unauthorized AI processes on the local network.
-    
+
     Returns a list of potential "shadow AI" risks - unauthorized
     LLM services that may pose compliance or security risks.
     """
     from app.services.shadow_scanner import get_shadow_scanner
-    
-    scanner = get_shadow_scanner()
-    risks = scanner.scan_ports()
-    
-    return scanner.get_report()
 
+    scanner = get_shadow_scanner()
+    scanner.scan_ports()
+
+    return scanner.get_report()

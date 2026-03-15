@@ -34,6 +34,7 @@ bin/
 *.exe
 
 # Logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -51,6 +52,22 @@ Desktop.ini
 .idea/
 *.swp
 *.swo
+
+# Code Quality Tools
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+coverage.xml
+.pytest_cache/
+
+# Playwright
+ui/test-results/
+ui/playwright-report/
+ui/e2e/
+
+# Secrets
+.secrets.baseline
 
 # Project Specific
 tests/__pycache__/
